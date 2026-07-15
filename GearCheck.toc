@@ -1,0 +1,7 @@
+## Interface: 30300
+## Title: GearCheck
+## Notes: Hit cap tracking, stat comparison, and DPS delta estimates
+## Author: endsinstatic
+## Version: 1.0.0
+## SavedVariables: GearCheckDB
+core.lua
