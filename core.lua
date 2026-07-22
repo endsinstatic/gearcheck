@@ -9,15 +9,37 @@ local RATING_PER_PERCENT = {
     arpen   = 13.99,    -- armor pen rating per 1% ArPen
 }
 
--- Hit caps vs level 83 boss (in percent)
-local HIT_CAPS = {
-    melee_yellow = 8,     -- special attacks (SS, WF, etc.)
-    melee_white  = 28,    -- dual wield auto attacks
-    spell        = 17,    -- spell hit cap
+-- Base hit caps vs level 83 boss (in percent) — adjusted by raid buffs
+local BASE_HIT_CAPS = {
+    melee_yellow = 8,
+    melee_white  = 28,
+    spell        = 17,
 }
 
 -- Expertise cap: 26 expertise = 6.50% dodge reduction
 local EXPERTISE_CAP = 26
+
+local function GetEffectiveHitCaps()
+    local buffs = GearCheckDB and GearCheckDB.raidBuffs or {}
+    local caps = {}
+    for k, v in pairs(BASE_HIT_CAPS) do caps[k] = v end
+
+    -- Misery / Improved Faerie Fire: -3% spell hit (don't stack with each other)
+    if buffs.misery or buffs.iff then
+        caps.spell = caps.spell - 3
+    end
+
+    -- Heroic Presence: -1% all hit
+    if buffs.heroicPresence then
+        caps.spell = caps.spell - 1
+        caps.melee_yellow = caps.melee_yellow - 1
+        caps.melee_white = caps.melee_white - 1
+    end
+
+    return caps
+end
+
+GearCheck.GetEffectiveHitCaps = GetEffectiveHitCaps
 
 -- Stat keys from GetItemStats
 local STAT_KEYS = {
@@ -116,12 +138,20 @@ local function GetPlayerExpertise()
     return exp or 0
 end
 
-local function FormatCapLine(label, current, cap, unit)
+local function FormatCapLine(label, current, cap, unit, showRating)
     unit = unit or "%%"
     local remaining = cap - current
     if remaining <= 0 then
+        if showRating then
+            local overRating = math.floor(-remaining * RATING_PER_PERCENT.hit)
+            return ("|cff20ff20%s: %.1f%s CAPPED|r |cff888888(+%d rating over)|r"):format(label, current, unit, overRating)
+        end
         return ("|cff20ff20%s: %.1f%s (CAPPED)|r"):format(label, current, unit)
     else
+        if showRating then
+            local needRating = math.ceil(remaining * RATING_PER_PERCENT.hit)
+            return ("|cffff8020%s: %.1f / %.0f%s (need %d rating)|r"):format(label, current, cap, unit, needRating)
+        end
         return ("|cffff8020%s: %.1f / %.0f%s (need %.1f)|r"):format(label, current, cap, unit, remaining)
     end
 end
@@ -130,11 +160,21 @@ local function AddHitCapLines(tooltip)
     local meleeHit = GetMeleeHitPercent()
     local spellHit = GetSpellHitPercent()
     local expertise = GetPlayerExpertise()
+    local caps = GetEffectiveHitCaps()
+
+    local buffs = GearCheckDB and GearCheckDB.raidBuffs or {}
+    local buffNote = ""
+    if buffs.misery then buffNote = " w/Misery"
+    elseif buffs.iff then buffNote = " w/IFF"
+    end
+    if buffs.heroicPresence then
+        buffNote = buffNote .. (buffNote ~= "" and "+" or " w/") .. "Draenei"
+    end
 
     tooltip:AddLine(" ")
-    tooltip:AddLine("|cffffcc00GearCheck|r")
-    tooltip:AddLine(FormatCapLine("Spell Hit", spellHit, HIT_CAPS.spell, "%"))
-    tooltip:AddLine(FormatCapLine("Melee Hit", meleeHit, HIT_CAPS.melee_yellow, "%"))
+    tooltip:AddLine("|cffffcc00GearCheck|r" .. (buffNote ~= "" and (" |cff888888(" .. buffNote:sub(2) .. ")|r") or ""))
+    tooltip:AddLine(FormatCapLine("Spell Hit", spellHit, caps.spell, "%", true))
+    tooltip:AddLine(FormatCapLine("Melee Hit", meleeHit, caps.melee_yellow, "%", true))
     tooltip:AddLine(FormatCapLine("Expertise", expertise, EXPERTISE_CAP, ""))
 end
 
@@ -202,7 +242,8 @@ local function CalcDPSDelta(tooltipStats, equippedStats)
     end
 
     local spellHit = GetSpellHitPercent()
-    if spellHit >= HIT_CAPS.spell then
+    local caps = GetEffectiveHitCaps()
+    if spellHit >= caps.spell then
         activeWeights.hit = 0
     end
 
@@ -345,17 +386,247 @@ local function PrintCaps()
     local meleeRating = GetCombatRating(CR_HIT_MELEE)
     local spellRating = GetCombatRating(CR_HIT_SPELL)
     local expertise = GetPlayerExpertise()
+    local caps = GetEffectiveHitCaps()
 
-    print("|cffffcc00GearCheck|r hit caps:")
-    print(("  Spell Hit:  %.1f%% / %d%%  (rating: %d, need %d more)"):format(
-        spellHit, HIT_CAPS.spell, spellRating,
-        math.max(0, math.ceil((HIT_CAPS.spell - spellHit) * RATING_PER_PERCENT.hit))
-    ))
-    print(("  Melee Hit:  %.1f%% / %d%%  (rating: %d, need %d more)"):format(
-        meleeHit, HIT_CAPS.melee_yellow, meleeRating,
-        math.max(0, math.ceil((HIT_CAPS.melee_yellow - meleeHit) * RATING_PER_PERCENT.hit))
-    ))
-    print(("  Expertise:  %d / %d"):format(expertise, EXPERTISE_CAP))
+    local buffs = GearCheckDB and GearCheckDB.raidBuffs or {}
+    local notes = {}
+    if buffs.misery then notes[#notes + 1] = "Misery" end
+    if buffs.iff then notes[#notes + 1] = "Imp. Faerie Fire" end
+    if buffs.heroicPresence then notes[#notes + 1] = "Heroic Presence" end
+
+    print("|cffffcc00GearCheck|r hit caps" .. (#notes > 0 and (" (with " .. table.concat(notes, ", ") .. ")") or "") .. ":")
+
+    local spellNeed = math.max(0, math.ceil((caps.spell - spellHit) * RATING_PER_PERCENT.hit))
+    local spellOver = math.max(0, math.floor((spellHit - caps.spell) * RATING_PER_PERCENT.hit))
+    if spellHit >= caps.spell then
+        print(("  Spell Hit:  %.1f%% / %d%%  |cff20ff20CAPPED|r (+%d rating over, can drop %d rating)"):format(
+            spellHit, caps.spell, spellOver, spellOver))
+    else
+        print(("  Spell Hit:  %.1f%% / %d%%  |cffff8020need %d more hit rating|r (= %d Rigid gems)"):format(
+            spellHit, caps.spell, spellNeed, math.ceil(spellNeed / 20)))
+    end
+
+    local meleeNeed = math.max(0, math.ceil((caps.melee_yellow - meleeHit) * RATING_PER_PERCENT.hit))
+    if meleeHit >= caps.melee_yellow then
+        print(("  Melee Hit:  %.1f%% / %d%%  |cff20ff20CAPPED|r"):format(meleeHit, caps.melee_yellow))
+    else
+        print(("  Melee Hit:  %.1f%% / %d%%  |cffff8020need %d more hit rating|r"):format(
+            meleeHit, caps.melee_yellow, meleeNeed))
+    end
+
+    print(("  Expertise:  %d / %d%s"):format(expertise, EXPERTISE_CAP,
+        expertise >= EXPERTISE_CAP and "  |cff20ff20CAPPED|r" or
+        ("  |cffff8020need " .. (EXPERTISE_CAP - expertise) .. " more|r")))
+end
+
+-- ============================================================
+-- Gear Export
+-- ============================================================
+
+local EXPORT_SLOTS = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }
+
+-- Hidden tooltip for scanning enchant names
+local scanTip = CreateFrame("GameTooltip", "GearCheckScanTip", nil, "GameTooltipTemplate")
+scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+
+local function GetEnchantText(slotID)
+    scanTip:ClearLines()
+    scanTip:SetInventoryItem("player", slotID)
+    -- Enchant line is typically green text containing common enchant keywords
+    for i = 2, scanTip:NumLines() do
+        local line = _G["GearCheckScanTipTextLeft" .. i]
+        if line then
+            local text = line:GetText()
+            local r, g, b = line:GetTextColor()
+            -- Green text (enchants) has g > 0.9 and r < 0.2 and b < 0.2
+            if text and g > 0.9 and r < 0.2 and b < 0.2 then
+                -- Skip gem socket lines and "Durability" etc.
+                if not text:match("^%a+ Socket$")
+                    and not text:match("^Durability")
+                    and not text:match("^Requires")
+                    and not text:match("^Item Level")
+                    and not text:match("^Equip:")
+                    and not text:match("^Use:")
+                    and not text:match("^Chance on")
+                    and not text:match("^Classes:")
+                    and not text:match("^Set:") then
+                    return text
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function BuildExportText()
+    local lines = {}
+    local function add(s) lines[#lines + 1] = s end
+
+    -- Character info
+    local name = UnitName("player")
+    local _, class = UnitClass("player")
+    local level = UnitLevel("player")
+    local _, race = UnitRace("player")
+    add("=== GearCheck Export ===")
+    add(("%s | %s %s | Level %d"):format(name, race, class, level))
+    add("")
+
+    -- Combat ratings
+    local meleeHit = GetMeleeHitPercent()
+    local spellHit = GetSpellHitPercent()
+    local expertise = GetPlayerExpertise()
+    local caps = GetEffectiveHitCaps()
+
+    local buffs = GearCheckDB and GearCheckDB.raidBuffs or {}
+    local buffList = {}
+    if buffs.misery then buffList[#buffList + 1] = "Misery" end
+    if buffs.iff then buffList[#buffList + 1] = "IFF" end
+    if buffs.heroicPresence then buffList[#buffList + 1] = "Heroic Presence" end
+
+    add("--- Caps ---")
+    add(("Spell Hit: %.1f%% / %d%% (%s)"):format(spellHit, caps.spell,
+        spellHit >= caps.spell and "CAPPED" or ("need " .. math.ceil((caps.spell - spellHit) * RATING_PER_PERCENT.hit) .. " rating")))
+    add(("Melee Hit: %.1f%% / %d%% (%s)"):format(meleeHit, caps.melee_yellow,
+        meleeHit >= caps.melee_yellow and "CAPPED" or ("need " .. math.ceil((caps.melee_yellow - meleeHit) * RATING_PER_PERCENT.hit) .. " rating")))
+    add(("Expertise: %d / %d (%s)"):format(expertise, EXPERTISE_CAP,
+        expertise >= EXPERTISE_CAP and "CAPPED" or ("need " .. (EXPERTISE_CAP - expertise))))
+    if #buffList > 0 then
+        add(("Raid buffs: %s"):format(table.concat(buffList, ", ")))
+    end
+    add("")
+
+    -- Combat stats
+    add("--- Ratings ---")
+    add(("Hit Rating: %d  |  Crit Rating: %d  |  Haste Rating: %d"):format(
+        GetCombatRating(CR_HIT_SPELL),
+        GetCombatRating(CR_CRIT_MELEE),
+        GetCombatRating(CR_HASTE_MELEE)))
+    add(("AP: %d  |  SP: %d"):format(
+        UnitAttackPower("player"),
+        GetSpellBonusDamage(4) or 0)) -- school 4 = fire, close enough for Enh
+    add(("Crit: %.1f%% melee / %.1f%% spell"):format(
+        GetCritChance(),
+        GetSpellCritChance(4)))
+    add(("Haste: %.1f%%"):format(GetCombatRatingBonus(CR_HASTE_MELEE)))
+    add("")
+
+    -- Equipped gear
+    add("--- Gear ---")
+    for _, slotID in ipairs(EXPORT_SLOTS) do
+        local link = GetInventoryItemLink("player", slotID)
+        local slotName = SLOT_NAMES[slotID] or ("Slot" .. slotID)
+        if link then
+            local itemName, _, quality, iLevel = GetItemInfo(link)
+            if itemName then
+                -- Get gem names
+                local gems = {}
+                for i = 1, 3 do
+                    local gemName, gemLink = GetItemGem(link, i)
+                    if gemName then
+                        -- Extract gem stats from the gem's own tooltip
+                        local gemStats = gemLink and NormalizeStats(gemLink)
+                        local gemDesc = gemName
+                        if gemStats then
+                            local gsParts = {}
+                            for _, k in ipairs({ "hit", "sp", "ap", "haste", "crit", "agi", "str", "int", "sta", "expertise", "arpen" }) do
+                                if gemStats[k] and gemStats[k] > 0 then
+                                    gsParts[#gsParts + 1] = "+" .. gemStats[k] .. " " .. k
+                                end
+                            end
+                            if #gsParts > 0 then
+                                gemDesc = gemName .. " (" .. table.concat(gsParts, ", ") .. ")"
+                            end
+                        end
+                        gems[#gems + 1] = gemDesc
+                    end
+                end
+
+                -- Get item base stats
+                local stats = NormalizeStats(link)
+                local statParts = {}
+                if stats then
+                    local order = { "hit", "sp", "ap", "haste", "crit", "agi", "str", "int", "sta", "arpen", "expertise" }
+                    for _, k in ipairs(order) do
+                        if stats[k] and stats[k] > 0 then
+                            statParts[#statParts + 1] = k .. ":" .. stats[k]
+                        end
+                    end
+                end
+
+                -- Get enchant name via tooltip scan
+                local enchantText = GetEnchantText(slotID)
+
+                add(("%-10s iLvl %-3d  %s"):format(slotName, iLevel or 0, itemName))
+                if #statParts > 0 then
+                    add("           Stats:   " .. table.concat(statParts, ", "))
+                end
+                if enchantText then
+                    add("           Enchant: " .. enchantText)
+                end
+                if #gems > 0 then
+                    add("           Gems:    " .. table.concat(gems, " | "))
+                end
+            end
+        else
+            add(("%-10s (empty)"):format(slotName))
+        end
+    end
+
+    add("")
+    add("=== End Export ===")
+    return table.concat(lines, "\n")
+end
+
+-- Export frame (copy-paste dialog)
+local exportFrame
+
+local function ShowExportFrame(text)
+    if not exportFrame then
+        local f = CreateFrame("Frame", "GearCheckExportFrame", UIParent)
+        f:SetWidth(600)
+        f:SetHeight(450)
+        f:SetPoint("CENTER")
+        f:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true, tileSize = 32, edgeSize = 32,
+            insets = { left = 11, right = 12, top = 12, bottom = 11 },
+        })
+        f:SetBackdropColor(0, 0, 0, 1)
+        f:EnableMouse(true)
+        f:SetMovable(true)
+        f:RegisterForDrag("LeftButton")
+        f:SetScript("OnDragStart", f.StartMoving)
+        f:SetScript("OnDragStop", f.StopMovingOrSizing)
+        f:SetFrameStrata("DIALOG")
+
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        title:SetPoint("TOP", 0, -16)
+        title:SetText("|cffffcc00GearCheck Export|r  (Ctrl+A, Ctrl+C to copy)")
+
+        local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", -5, -5)
+
+        local scroll = CreateFrame("ScrollFrame", "GearCheckExportScroll", f, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", 16, -40)
+        scroll:SetPoint("BOTTOMRIGHT", -36, 16)
+
+        local editBox = CreateFrame("EditBox", "GearCheckExportEditBox", scroll)
+        editBox:SetMultiLine(true)
+        editBox:SetAutoFocus(false)
+        editBox:SetFontObject(GameFontHighlightSmall)
+        editBox:SetWidth(540)
+        editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus(); f:Hide() end)
+        scroll:SetScrollChild(editBox)
+
+        f.editBox = editBox
+        exportFrame = f
+    end
+
+    exportFrame.editBox:SetText(text)
+    exportFrame:Show()
+    exportFrame.editBox:HighlightText()
+    exportFrame.editBox:SetFocus()
 end
 
 SLASH_GEARCHECK1 = "/gearcheck"
@@ -373,12 +644,18 @@ SlashCmdList["GEARCHECK"] = function(msg)
     elseif cmd == "reset" then
         GearCheckDB.weights = nil
         print("|cffffcc00GearCheck|r: Weights reset to defaults.")
+    elseif cmd == "export" then
+        ShowExportFrame(BuildExportText())
+    elseif cmd == "options" or cmd == "config" or cmd == "settings" then
+        GearCheck.OpenOptions()
     else
         print("|cffffcc00GearCheck|r commands:")
         print("  /gc caps — show hit/expertise caps")
+        print("  /gc export — export gear for analysis")
         print("  /gc weights — show current stat weights")
         print("  /gc weight <stat> <value> — set a weight")
         print("  /gc reset — reset weights to defaults")
+        print("  /gc options — open settings panel")
     end
 end
 

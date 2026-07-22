@@ -5,3 +5,4 @@
 ## Version: 1.0.0
 ## SavedVariables: GearCheckDB
 core.lua
+options.lua
